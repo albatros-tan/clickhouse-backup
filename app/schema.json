@@ -1,0 +1,6 @@
+[
+    {
+        "table_name": "fake_income_tax", 
+        "partition_key": "load_guid"
+    }
+]
