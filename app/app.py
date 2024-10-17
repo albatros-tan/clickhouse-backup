@@ -1,7 +1,9 @@
 import os
 import asyncio
 import json
-from typing import Union, List
+import time
+from datetime import datetime
+from typing import Union, List, Dict
 from asyncio import Semaphore
 from uuid import UUID, uuid4
 from asyncpg.pool import Pool
@@ -10,9 +12,11 @@ from asynch import connect
 from .db_connectors.connection import create_psql_pool
 from .db_connectors.clickhouse_connector import ClickhouseTable
 from .db_connectors.postgresql_connector import PsQLTable
-from .types import InfoMessages, TablesShemaEntity
+from .types import InfoMessages, TablesShemaEntity, S3FunctionParameters
+from .types import DBLevelLog,  BackupHistoryEntity, BackupLogEntity
 from settings.db import DbConfig
 from settings.app import AppConfig
+from settings.s3 import S3Config
 from settings.clickhouse import ClHouseConfig
 from settings.log import app_log
 
@@ -37,12 +41,21 @@ class App:
         
 class Table:
     click_connect: connect = None
+    table_schema = None
     
-    def __init__(self, table_name: str, partition_key: Union[str, None], semaphore: Semaphore, psql: Pool):
+    def __init__(
+            self, 
+            table_name: str, 
+            partition_key: Union[str, None], 
+            semaphore: Semaphore, 
+            psql: Pool, 
+            datetime_backup: str
+        ):
         self.table_name = table_name
         self.partition_key = partition_key
         self.semaphore = semaphore
         self.psql = psql
+        self.datetime_backup = datetime_backup
         
     async def _init(self):
         self.click_connect = await connect(**ClHouseConfig.get_connection_data())
@@ -82,22 +95,117 @@ class Table:
             app_log.info(InfoMessages.NOT_RELEVANTE_SCHEMA.value.format(table_name=self.table_name))
             return False
         
-    async def make_keys_list_for_backup(self) -> List[Union[str, None]]:
+    async def make_keys_list_for_backup(self, force: bool, key_name: str) -> Union[List[Dict], None]:
         """
         если Partition_key = None, то смотрим count() по всей таблице и сверяем с
         psql.backup_history count послежнего бэкапа,
         если Partition_key != None, то смотрим count() с группировкой по полю = 
-        partition key. На выход подается пассив тех значений partition_key поля,
-        count() которых не соответствует соответствующему count в psql.backup_history
-        """
-        return [None]
+        partition key. 
+        Если force = True, на выход подается массив всех пар {partition_key: count()}
+        Если force = False, запускается сверка с количеством записей в предыдущем бэкапе
+                            на выход подается пассив тех пар {partition_key: count()},
+                            count() которых не соответствует соответствующему count 
+                            в psql.backup_history
+        Для случая, когда self.partition_key = None метод вернет [{'-': count()}]
         
+        """
+        try:
+            if self.partition_key is None:
+                parts = {'-': await self.click_table.get_count_records()}
+            else:
+                parts = await self.click_table.get_count_records_by_pkey(self.partition_key)
+        except Exception as err:
+            app_log.error(err, exc_info=True)
+            raise
+        if force:
+            return parts
+        try:
+            last_parts = await self.psql_table.get_count_records_in_last_backup(self.table_name)
+        except Exception as err:
+            app_log.error(err, exc_info=True)
+            raise
+        return [item for item in parts if item['count'] != last_parts.get(str(item[key_name]), 0)]
+        
+    def generate_backup_file_name(self, pkey_value: str) -> str:
+        table_label = self.table_name.replace("_", "-")
+        pkey_label = pkey_value.replace("-", "")
+        return f"{table_label}-{pkey_label}-{self.datetime_backup}"
+    
+    async def backup_record(self, key_value: str, count: int, backup_guid: str):
+        app_log.info(InfoMessages.START_TASK.value.format(table_name=self.table_name, key_value=key_value))
+        file_name=self.generate_backup_file_name(key_value)
+        path_to_file = ClHouseConfig.get_path_to_s3_function(file_name=file_name)
+        s3_parameters = S3FunctionParameters(
+            path_to_file=path_to_file, 
+            s3_access_key=S3Config.ACCESS_KEY, 
+            s3_secret_key=S3Config.SECRET_KEY, 
+            format_file=ClHouseConfig.FORMAT_BACKUP_FILE, 
+            fields=', '.join([f"{key} {val}" for key, val in self.table_schema.items()]),
+            compression=ClHouseConfig.COMPRESSION_BACKUP
+        )
+        
+        await self.semaphore.acquire()
+        t_start = time.time()
+        try:
+            await self.click_table.create_backup(self.partition_key, key_value, s3_parameters)
+        except Exception as err:
+            event_error = True
+            app_log.error(
+                InfoMessages.TASK_ERROR.value.format(table_name=self.table_name, partition_value=key_value),
+                exc_info=True
+            )
+            error_message = err.__str__()
+        else:
+            event_error = False           
+        self.semaphore.release()
+        
+        if event_error:
+            data = BackupLogEntity(
+                backup_guid=backup_guid,
+                table_name=self.table_name, 
+                partition_key=key_value, 
+                event=error_message,
+                level=DBLevelLog.ERROR
+            )
+            coro = self.psql_table.insert_backup_log
+        else:
+            data = BackupHistoryEntity(
+                backup_guid=backup_guid, 
+                table_name=self.table_name, 
+                partition_key=key_value, 
+                count=count, 
+                file_name=file_name,
+                execution_time = time.time() - t_start
+            )
+            coro = self.psql_table.insert_backup_history
+        
+        try:
+            await coro(data)
+        except:
+            app_log.warning(InfoMessages.PSQL_ERROR.value, exc_info=True)
+    
     async def backup(self, backup_guid: UUID, force: bool = None):
         await self._init()
         if not force:
             check = await self.check_relevance_backup_schema(backup_guid)
             if check == False:
-                await self.create_backup_schema(backup_guid)
+                force = True
+        key_name = '-' if self.partition_key is None else self.partition_key
+        parts_to_backup = await self.make_keys_list_for_backup(force, key_name)
+        if parts_to_backup:
+            await self.create_backup_schema(backup_guid)
+        tasks = [
+            asyncio.create_task(
+                self.backup_record(
+                    key_value=str(part[key_name]),
+                    count=part['count'], 
+                    backup_guid=str(backup_guid)
+                ),
+                name=f"{self.table_name}-{part[key_name]}"
+            ) for part in parts_to_backup
+        ]
+        done, pending = await asyncio.wait(tasks)
+        
         await self._close()
         
         
@@ -117,25 +225,42 @@ class Backup(App):
         return None
     
     async def _execute(self, table: str = None, force: bool = None):
+        app_log.info(InfoMessages.START_BACKUP.value.format(backup_guid=self.backup_guid))
+        datetime_backup = datetime.now().strftime("%Y%m%d%H%M%S")
         if table is None:
             tables = [
                 Table(
                     table_name=item['table_name'],
                     partition_key=item['partition_key'],
                     semaphore=self.semaphore,
-                    psql=self.psql_pool
+                    psql=self.psql_pool,
+                    datetime_backup=datetime_backup
                 ) for item in self.tables_for_backup
             ]
         else:
             partition_key = self.find_partition_key(table_name=table)
             tables = [
-                Table(table_name=table, partition_key=partition_key, semaphore=self.semaphore, psql=self.psql_pool)
+                Table(
+                    table_name=table,
+                    partition_key=partition_key, 
+                    semaphore=self.semaphore, 
+                    psql=self.psql_pool, 
+                    datetime_backup=datetime_backup
+                )
             ]
             
-        # Для дебага
-        table = tables[0]
-        await table.backup(self.backup_guid, force)
-                               
+        tasks = [
+            asyncio.create_task(table.backup(self.backup_guid, force), name=table.table_name) for table in tables
+        ]
+        
+        try:
+            done, _ = await asyncio.wait(tasks)
+        except Exception:
+            app_log.error(InfoMessages.ERROR_BACKUP.value.format(backup_guid=self.backup_guid), exc_info=True)
+            raise
+        else:
+            app_log.info(InfoMessages.COMPLETE_BACKUP.value.format(backup_guid=self.backup_guid))   
+
     
 class Restore(App):
     

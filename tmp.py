@@ -6,6 +6,12 @@ import asyncio
 from settings.clickhouse import ClHouseConfig
 
 
+async def additional_coro(num_process):
+    print(f"addition coro {num_process} is run")
+    await asyncio.sleep(0.09)
+    print(f"addition coro {num_process} is stop")
+    
+
 async def simple_request(num_process, sleep_time):
     print(f"{num_process} is run")
     await asyncio.sleep(sleep_time)
@@ -30,8 +36,14 @@ async def main_():
         ]
     )
     
+    
+async def _main_():
+    coro = simple_request
+    print("wait")
+    await coro(15, 0.2)
+    
 
-# asyncio.run(main())
+asyncio.run(_main_())
 
 from settings.clickhouse import ClHouseConfig
 from asynch import connect
@@ -45,9 +57,9 @@ async def connect_database():
 async def test_func(conn: Connection):
     async with conn.cursor(cursor=DictCursor) as cursor:
         #await cursor.execute("describe table fake_income_tax")
-        await cursor.execute("select load_guid, count() from fake_income_tax group by load_guid")
+        await cursor.execute("select load_guid, count() as count from fake_income_tax group by load_guid")
         res = await cursor.fetchall()
-        #await cursor.execute("select count() from fake_income_tax")
+        #await cursor.execute("select count() as cnt from fake_income_tax")
         #res = await cursor.fetchone()
         print(res)
         
@@ -58,6 +70,6 @@ async def main():
     
 
     
-asyncio.run(main())
+#asyncio.run(main())
 
     

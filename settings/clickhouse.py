@@ -18,7 +18,7 @@ class ClHouseConfig:
         return os.path.join(
             S3Config.HOST, 
             S3Config.BUCKET_NAME,
-            f"{file_name}.{cls.FORMAT_BACKUP_FILE.lower()}.{cls.COMPRESSION_BACKUP}"
+            f"{file_name}.{cls.FORMAT_BACKUP_FILE.lower()}.gz"
         )
     
     @classmethod
