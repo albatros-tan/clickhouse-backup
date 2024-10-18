@@ -190,6 +190,8 @@ class Table:
             check = await self.check_relevance_backup_schema(backup_guid)
             if check == False:
                 force = True
+        else:
+            self.table_schema = await self.click_table.get_schema_table()
         key_name = '-' if self.partition_key is None else self.partition_key
         parts_to_backup = await self.make_keys_list_for_backup(force, key_name)
         if parts_to_backup:

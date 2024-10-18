@@ -2,7 +2,7 @@ from typing import Dict, List, Union
 from asynch.proto.connection import Connection
 from asynch.cursors import DictCursor
 
-from .exceptions import ErrorGettingTableDescription, ErrorGettingDataCount
+from .exceptions import ErrorGettingTableDescription, ErrorGettingDataCount, ErrorBackup
 from ..types import S3FunctionParameters
 
 
@@ -29,8 +29,8 @@ class ClickhouseConnector:
     
     async def execute(self, sql) -> int:
         async with self.click_connect.cursor(cursor=DictCursor) as cursor:
-            result = await cursor.execute(sql)
-        return result
+            await cursor.execute(sql)
+            
 
 class ClickhouseTable(ClickhouseConnector):
     
@@ -67,7 +67,10 @@ class ClickhouseTable(ClickhouseConnector):
     ):
         sql = f"insert into function s3{s3_parameters.compile_param()} select * from {self.table_name}"
         if partition_key != "-":
-            sql += f" where {partition_key} = {pkey_value};"
-        print(sql)
+            sql += f" where {partition_key} = '{pkey_value}';"
+        try:
+            await self.execute(sql)
+        except Exception as e:
+            raise ErrorBackup(e.__str__()) from e
             
 

@@ -7,6 +7,10 @@ class ErrorGettingDataCount(Exception):
     pass
 
 
+class ErrorBackup(Exception):
+    pass
+
+
 # Exceptions for postgresql connetor
 class ErrorGettingBackupSchema(Exception):
     pass
