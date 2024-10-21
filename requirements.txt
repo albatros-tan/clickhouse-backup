@@ -1,2 +1,7 @@
-asyncpg
-yoyo-migrations
+environs
+click
+
+asyncpg                 == 0.29.0
+yoyo-migrations         == 9.0.0
+asynch                  == 0.2.4
+
