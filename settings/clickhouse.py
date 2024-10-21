@@ -12,6 +12,7 @@ class ClHouseConfig:
     RECEIVE_TIMEOUT = env.int("CLICK_TIMEOUT", default=1000)
     FORMAT_BACKUP_FILE = "CSV"
     COMPRESSION_BACKUP = "gzip"
+    POOL_MAXSIZE = env.int("POOL_MAXSIZE", default=2)
     
     @classmethod
     def get_path_to_s3_function(cls, file_name: str):

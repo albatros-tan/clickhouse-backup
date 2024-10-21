@@ -1,5 +1,6 @@
 from typing import Dict, List, Union
 from asynch.proto.connection import Connection
+from asynch.pool import Pool
 from asynch.cursors import DictCursor
 
 from .exceptions import ErrorGettingTableDescription, ErrorGettingDataCount, ErrorBackup
@@ -8,19 +9,21 @@ from ..types import S3FunctionParameters
 
 class ClickhouseConnector:
     
-    def __init__(self, click_connect: Connection):
+    def __init__(self, click_connect: Pool):
         self.click_connect = click_connect
         
     async def fetchall(self, sql) -> List[Dict]:
-        async with self.click_connect.cursor(cursor=DictCursor) as cursor:
-            await cursor.execute(sql)
-            result = await cursor.fetchall()
+        async with self.click_connect.acquire() as conn:
+            async with conn.cursor(cursor=DictCursor) as cursor:
+                await cursor.execute(sql)
+                result = await cursor.fetchall()
         return result
     
     async def fetchone(self, sql) -> Dict:
-        async with self.click_connect.cursor(cursor=DictCursor) as cursor:
-            await cursor.execute(sql)
-            result = await cursor.fetchone()
+        async with self.click_connect.acquire() as conn:
+            async with conn.cursor(cursor=DictCursor) as cursor:
+                await cursor.execute(sql)
+                result = await cursor.fetchone()
         return result
     
     async def fetchval(self, sql) -> Union[str, int, float]:
@@ -28,13 +31,14 @@ class ClickhouseConnector:
         return list(result.values())[0]
     
     async def execute(self, sql) -> int:
-        async with self.click_connect.cursor(cursor=DictCursor) as cursor:
-            await cursor.execute(sql)
+        async with self.click_connect.acquire() as conn:
+            async with conn.cursor(cursor=DictCursor) as cursor:
+                await cursor.execute(sql)
             
 
 class ClickhouseTable(ClickhouseConnector):
     
-    def __init__(self, table_name: str, click_connect: Connection):
+    def __init__(self, table_name: str, click_connect: Pool):
         super().__init__(click_connect)
         self.table_name = table_name
         

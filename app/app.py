@@ -7,7 +7,8 @@ from typing import Union, List, Dict
 from asyncio import Semaphore
 from uuid import UUID, uuid4
 from asyncpg.pool import Pool
-from asynch import connect
+from asynch import connect, create_pool
+from asynch.pool import Pool as ClickPool
 
 from .db_connectors.connection import create_psql_pool
 from .db_connectors.clickhouse_connector import ClickhouseTable
@@ -26,9 +27,13 @@ class App:
     
     async def _init(self):
         self.psql_pool = await create_psql_pool(**DbConfig.CONNECTION_SETTINGS)
+        self.click_connect = await create_pool(maxsize=ClHouseConfig.POOL_MAXSIZE, **ClHouseConfig.get_connection_data())
+        
         
     async def _close(self):
         await self.psql_pool.close()
+        self.click_connect.close()
+        await self.click_connect.wait_closed()
         
     async def _execute(self, **kwargs):
         raise NotImplementedError("The _execute method must be defined")
@@ -48,24 +53,24 @@ class Table:
             table_name: str, 
             partition_key: Union[str, None], 
             semaphore: Semaphore, 
-            psql: Pool, 
+            psql: Pool,
+            click_pool: ClickPool,
             datetime_backup: str
         ):
         self.table_name = table_name
         self.partition_key = partition_key
         self.semaphore = semaphore
         self.psql = psql
+        self.click_connect = click_pool
         self.datetime_backup = datetime_backup
         
     async def _init(self):
-        self.click_connect = await connect(**ClHouseConfig.get_connection_data())
         self.click_table = ClickhouseTable(self.table_name, self.click_connect)
         self.psql_table = PsQLTable(psql_pool=self.psql)
     
     async def _close(self):
         del self.click_table
         del self.psql_table
-        await self.click_connect.close()
         
     async def create_backup_schema(self, backup_guid: UUID):
         data = [
@@ -110,8 +115,9 @@ class Table:
         
         """
         try:
-            if self.partition_key is None:
-                parts = {'-': await self.click_table.get_count_records()}
+            if self.partition_key is None or key_name=='-':
+                parts = [{key_name: "-", 'count': await self.click_table.get_count_records()}]
+                # parts = {'-': await self.click_table.get_count_records()}
             else:
                 parts = await self.click_table.get_count_records_by_pkey(self.partition_key)
         except Exception as err:
@@ -143,7 +149,6 @@ class Table:
             fields=', '.join([f"{key} {val}" for key, val in self.table_schema.items()]),
             compression=ClHouseConfig.COMPRESSION_BACKUP
         )
-        
         await self.semaphore.acquire()
         t_start = time.time()
         try:
@@ -196,17 +201,17 @@ class Table:
         parts_to_backup = await self.make_keys_list_for_backup(force, key_name)
         if parts_to_backup:
             await self.create_backup_schema(backup_guid)
-        tasks = [
-            asyncio.create_task(
-                self.backup_record(
-                    key_value=str(part[key_name]),
-                    count=part['count'], 
-                    backup_guid=str(backup_guid)
-                ),
-                name=f"{self.table_name}-{part[key_name]}"
-            ) for part in parts_to_backup
-        ]
-        done, pending = await asyncio.wait(tasks)
+            tasks = [
+                asyncio.create_task(
+                    self.backup_record(
+                        key_value=str(part[key_name]),
+                        count=part['count'], 
+                        backup_guid=str(backup_guid)
+                    ),
+                    name=f"{self.table_name}-{part[key_name]}"
+                ) for part in parts_to_backup
+            ]
+            done, pending = await asyncio.wait(tasks)
         
         await self._close()
         
@@ -236,6 +241,7 @@ class Backup(App):
                     partition_key=item['partition_key'],
                     semaphore=self.semaphore,
                     psql=self.psql_pool,
+                    click_pool=self.click_connect,
                     datetime_backup=datetime_backup
                 ) for item in self.tables_for_backup
             ]
@@ -246,7 +252,8 @@ class Backup(App):
                     table_name=table,
                     partition_key=partition_key, 
                     semaphore=self.semaphore, 
-                    psql=self.psql_pool, 
+                    psql=self.psql_pool,
+                    click_pool=self.click_connect,
                     datetime_backup=datetime_backup
                 )
             ]

@@ -2,5 +2,9 @@
     {
         "table_name": "fake_income_tax", 
         "partition_key": "load_guid"
+    },
+    {
+        "table_name": "data_tests", 
+        "partition_key": "-"
     }
 ]

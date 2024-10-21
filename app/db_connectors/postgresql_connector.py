@@ -24,7 +24,8 @@ def get_last_backup_sqhema_query(table_name: str):
     return f"""{get_last_backup_guid(table_name)}
     select json_agg(json_build_object(field_name, field_type)) as schema 
     from clickhouse_backup.tables_schema ts
-    right join last_backup on ts.backup_guid  = last_backup.backup_guid;
+    right join last_backup on ts.backup_guid  = last_backup.backup_guid
+    where ts.table_name='{table_name}';
     """
     
 
