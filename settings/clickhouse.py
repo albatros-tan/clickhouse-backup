@@ -7,7 +7,7 @@ from .s3 import S3Config
 class ClHouseConfig:
     HOST = env.str("CLICK_HOST", default="localhost")
     PORT = env.int("CLICK_PORT", default=7000)
-    USER = env.str('CLICK_USER', default='default')
+    USER = env.str('CLICK_USERNAME', default='default')
     PASSWORD = env.str('CLICK_PASSWORD', default='')
     RECEIVE_TIMEOUT = env.int("CLICK_TIMEOUT", default=1000)
     FORMAT_BACKUP_FILE = "CSV"
